@@ -1,0 +1,13 @@
+.tools/
+vendor/
+build/
+backups/
+__pycache__/
+*.pyc
+.state/
+.DS_Store
+.env
+.env.*
+*.log
+*.pid
+.venv/
