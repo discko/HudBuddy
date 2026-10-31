@@ -34,6 +34,16 @@ sh scripts/hud.sh flash /dev/cu.usbmodem101
 
 setup 将依赖放入项目 `.tools/` 与 `vendor/`。正式固件使用 8 MiB 单应用分区，不支持 OTA。烧录前停止 Bridge，并自行备份设备原固件；仓库不包含任何设备备份。独立待机固件使用 `scripts/standby.sh`，保留旧的 60 秒直接息屏、USER 长按 3 秒唤醒规则。
 
+## 安装为日常后台服务
+
+推荐安装为用户级 LaunchAgent，程序、配置与日志独立于源码目录：
+
+```sh
+.tools/python/bin/python scripts/install-bridge.py install
+```
+
+首次需提供设备序列号或已配置开发模式 `.state/device-serial`。详见 [安装与维护](docs/installation.md)，包含启停、更新、卸载及配置说明。
+
 ## 开发模式运行 Bridge
 
 需要已安装的 `hud-cli` 及兼容检查 Skill；额度来自本机 Magpie 的 `http://127.0.0.1:3425/v1/magpie/quotas`。服务不直接读取 HUD 数据库。

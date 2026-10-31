@@ -6,6 +6,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import math
 import os
 from pathlib import Path
@@ -462,16 +463,30 @@ class Bridge:
 def main(argv: list[str] | None = None) -> int:
     global DEVICE_SERIAL
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--device-serial", default=DEVICE_SERIAL, help="target USB serial; defaults to HUDBUDDY_DEVICE_SERIAL or .state/device-serial")
+    parser.add_argument("--config", type=Path, help="runtime JSON config file")
+    parser.add_argument("--state-dir", type=Path, help="persistent cache directory")
+    parser.add_argument("--compatibility", type=Path, help="HUD compatibility checker path")
+    parser.add_argument("--device-serial", help="target USB serial; defaults to HUDBUDDY_DEVICE_SERIAL or .state/device-serial")
     parser.add_argument("--port", help="explicit USB serial path; otherwise discover this HudBuddy by VID/PID/serial")
-    parser.add_argument("--cli", type=Path, default=DEFAULT_CLI, help="absolute installed hud-cli path")
-    parser.add_argument("--poll-interval", "--interval", dest="poll_interval", type=float, default=60, help="HUD/Magpie poll seconds (default: 60; --interval is an alias)")
-    parser.add_argument("--heartbeat-interval", type=float, default=600, help="heartbeat seconds (default: 600)")
+    parser.add_argument("--cli", type=Path, help="absolute installed hud-cli path")
+    parser.add_argument("--poll-interval", "--interval", dest="poll_interval", type=float, help="HUD/Magpie poll seconds (default: 60; --interval is an alias)")
+    parser.add_argument("--heartbeat-interval", type=float, help="heartbeat seconds (default: 600)")
+    parser.add_argument("--log-file", type=Path, help="rotating log file (5 MiB, 3 backups)")
     parser.add_argument("--debug", action="store_true", help="log HUD checks, heartbeats, and USB registry events")
     parser.add_argument("--once", action="store_true", help="read and validate once without connecting USB")
     parser.add_argument("--stdout", action="store_true", help="emit the one-shot snapshot JSONL (requires --once)")
     args = parser.parse_args(argv)
-    DEVICE_SERIAL = args.device_serial.strip().upper()
+    from service.config import resolve_config
+    try:
+        settings = resolve_config(args)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
+    DEVICE_SERIAL = settings["device_serial"]
+    args.cli = Path(settings["hud_cli"])
+    args.compatibility = Path(settings["compatibility"])
+    args.poll_interval = settings["poll_interval"]
+    args.heartbeat_interval = settings["heartbeat_interval"]
+    state_path = Path(settings["state_dir"]) / "magpie-state.json"
     if not args.once and not DEVICE_SERIAL:
         parser.error("set --device-serial, HUDBUDDY_DEVICE_SERIAL or .state/device-serial")
     for name in ("poll_interval", "heartbeat_interval"):
@@ -479,9 +494,11 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("--" + name.replace("_", "-") + " must be at least 1 second")
     if args.stdout and not args.once:
         parser.error("--stdout requires --once")
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
-    client = HudClient(args.cli.expanduser(), timeout=1)
-    quota_client = MagpieClient(state_path=DEFAULT_STATE_PATH)
+    handler = RotatingFileHandler(args.log_file.expanduser(), maxBytes=5*1024*1024, backupCount=3, encoding="utf-8") if args.log_file else logging.StreamHandler(sys.stderr)
+    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s", handlers=[handler])
+    client = HudClient(args.cli.expanduser(), timeout=1, compatibility=args.compatibility.expanduser())
+    quota_client = MagpieClient(state_path=state_path)
     try:
         client.check_compatibility()
         if args.once:

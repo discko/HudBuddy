@@ -4,6 +4,8 @@
 
 ## 运行
 
+日常使用建议先按 [安装与维护](installation.md) 安装为 LaunchAgent。下述 `.state` 与直接启动命令描述开发模式；安装版由 `--config` 指定运行时配置，使用配置中的 `state_dir`，独立于源码。
+
 首次使用先配置设备序列号：`--device-serial` 参数优先，其次 `HUDBUDDY_DEVICE_SERIAL` 环境变量，再其次项目内 `.state/device-serial` 文件。匹配忽略大小写；没有配置时拒绝连接，不会自动选中其他 ESP32。`--once` 不需要配置设备。用 `python -m serial.tools.list_ports -v` 查看 USB 序列号。
 
 在项目根目录运行（现有 `.tools/python` 虚拟环境已有 pyserial）：
