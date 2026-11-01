@@ -8,6 +8,11 @@
 #include <HudBuddyPower.h>
 #include <cJSON.h>
 #include <esp_timer.h>
+#include <esp_sleep.h>
+#include <driver/rtc_io.h>
+#include <sys/time.h>
+#include <LittleFS.h>
+#include "FirmwareVersion.h"
 #include <vector>
 #include <time.h>
 #include <cmath>
@@ -30,6 +35,13 @@ HudBuddyPower powerPolicy;
 bool pmuReady=false, touchReady=false, received=false, dirty=true, hudOkay=true;
 bool haveTasks=false;
 bool pendingHello=true;
+bool displayReady=false,cacheReady=false,restoringCache=false,cacheChanged=false;
+cJSON *cachedSnapshot=nullptr;
+RTC_DATA_ATTR uint32_t sleepMarker=0;
+RTC_DATA_ATTR uint8_t savedPage=0;
+constexpr uint32_t SLEEP_MARKER=0x48424431;
+uint64_t lastCommunicationUnix=0;
+bool bootWakeConsumed=false;
 volatile bool touchPending=false,bootPending=false;
 ShortPressButton bootButton;
 bool touchPressed=false, touchActivity=false;
@@ -38,7 +50,7 @@ bool screensaver=false, suppressTouchUntilRelease=false;
 uint32_t saverStarted=0, saverFrameAt=0;
 int16_t touchX=0,touchY=0;
 uint32_t lastTouch=0;
-uint64_t lastCommunication=0, clockBase=0, clockAt=0;
+uint64_t clockBase=0, clockAt=0;
 int timezoneMinutes=480;
 char *lineBuffer=nullptr;
 size_t lineLength=0;
@@ -58,7 +70,7 @@ void IRAM_ATTR onTouch() { touchPending=true; }
 void report(const char *event) {
   if(Serial) Serial.printf("{\"type\":\"telemetry\",\"event\":\"%s\",\"awake\":%s,\"tasks\":%u,\"heap\":%u,\"uptime_ms\":%lu}\n",event,powerPolicy.awake()?"true":"false",unsigned(tasks.size()),ESP.getFreeHeap(),millis());
 }
-void hello() { if(Serial) Serial.println("{\"type\":\"hello\",\"protocol\":1,\"device\":\"HudBuddy\"}"); }
+void hello() { if(Serial) Serial.println("{\"type\":\"hello\",\"protocol\":1,\"device\":\"HudBuddy\",\"firmware\":\"" HUDBUDDY_VERSION "\"}"); }
 lv_obj_t *box(lv_obj_t *parent,int x,int y,int w,int h) {
   auto o=lv_obj_create(parent); lv_obj_remove_style_all(o);
   lv_obj_set_pos(o,x,y); lv_obj_set_size(o,w,h);
@@ -216,8 +228,27 @@ void receiveLine() {
     if(valid && hasQuota)valid=QuotaPage::parse(cJSON_GetObjectItemCaseSensitive(root,"quota"),nextQuota);
   }
   if(valid) {
-    received=true; lastCommunication=nowMs(); clockAt=lastCommunication;
+    received=true; clockAt=nowMs();
     clockBase=uint64_t(unixMs); timezoneMinutes=int(tz);
+    if(!restoringCache) {
+      lastCommunicationUnix=uint64_t(unixMs);
+      timeval tv={time_t(unixMs/1000),suseconds_t(uint64_t(unixMs)%1000*1000)};settimeofday(&tv,nullptr);
+      if(!cachedSnapshot)cachedSnapshot=cJSON_CreateObject();
+      for(const char *key:{"tasks","quota","hud_ok","magpie_last_success_ms","magpie_monitor_started_ms"}) {
+        auto v=cJSON_GetObjectItemCaseSensitive(root,key);
+        if(v) {cJSON_DeleteItemFromObjectCaseSensitive(cachedSnapshot,key);cJSON_AddItemToObject(cachedSnapshot,key,cJSON_Duplicate(v,true));}
+      }
+      if(hasQuota) {
+        cJSON_DeleteItemFromObjectCaseSensitive(cachedSnapshot,"magpie_last_success_ms");
+        cJSON_DeleteItemFromObjectCaseSensitive(cachedSnapshot,"magpie_monitor_started_ms");
+      }
+      for(const char *key:{"protocol","seq","unix_ms","tz_offset_min"})cJSON_DeleteItemFromObjectCaseSensitive(cachedSnapshot,key);
+      cJSON_DeleteItemFromObjectCaseSensitive(cachedSnapshot,"type");
+      cJSON_AddStringToObject(cachedSnapshot,"type","snapshot");
+      cJSON_AddNumberToObject(cachedSnapshot,"protocol",1);cJSON_AddNumberToObject(cachedSnapshot,"seq",0);
+      cJSON_AddNumberToObject(cachedSnapshot,"unix_ms",unixMs);cJSON_AddNumberToObject(cachedSnapshot,"tz_offset_min",tz);
+      cacheChanged=true;
+    }
     auto health=cJSON_GetObjectItemCaseSensitive(root,"hud_ok");
     if(cJSON_IsBool(health)) {bool ok=cJSON_IsTrue(health);if(ok!=hudOkay)dirty=true;hudOkay=ok;}
     if(heartbeat)QuotaPage::connectionTime(magpieSuccess,magpieStarted);
@@ -225,9 +256,8 @@ void receiveLine() {
       // A host push completes the boot handshake even before CDC is ready.
       pendingHello=false;
       if(hasTasks){tasks.swap(next);haveTasks=true;dirty=true;}
-      if(hasQuota)QuotaPage::set(std::move(nextQuota));
-      Serial.printf("{\"type\":\"ack\",\"seq\":%.0f}\n",seq);
-      report("snapshot");
+      if(hasQuota){if(restoringCache)nextQuota.stale=true;QuotaPage::set(std::move(nextQuota));}
+      if(!restoringCache) {Serial.printf("{\"type\":\"ack\",\"seq\":%.0f}\n",seq);report("snapshot");}
     }
   }
   cJSON_Delete(root);
@@ -253,7 +283,8 @@ void updateHeader() {
   bool usb=Serial.isPlugged();
   lv_label_set_text(usbLabel,usb?"USB  ON":"USB  OFF");
   lv_obj_set_style_text_color(usbLabel,lv_color_hex(usb?TEXT:MUTED),0);
-  uint64_t age=nowMs()-lastCommunication;
+  uint64_t currentUnix=clockBase+nowMs()-clockAt;
+  uint64_t age=received && currentUnix>=lastCommunicationUnix?currentUnix-lastCommunicationUnix:UINT64_MAX;
   uint32_t color=!received?0x636b78:age<60000?0x5ba7ff:age<600000?0x63c98d:age<3600000?0xe8c86a:0xef7379;
   lv_obj_set_style_bg_color(freshDot,lv_color_hex(color),0);
   if(pmuReady && pmu.isBatteryConnect()) {
@@ -275,6 +306,10 @@ void updateNavigation() {
 }
 bool readBootShortPress() {
   noInterrupts();bool pending=bootPending;bootPending=false;interrupts();
+  if(bootWakeConsumed) {
+    if(digitalRead(0)==HIGH) {bootWakeConsumed=false;bootButton.begin(millis(),false);}
+    return false;
+  }
   if(!pending && !bootButton.settling())return false;
   return bootButton.update(millis(),digitalRead(0)==LOW);
 }
@@ -299,32 +334,100 @@ void flush(lv_disp_drv_t *driver,const lv_area_t *a,lv_color_t *p) {
   lv_disp_flush_ready(driver);
 }
 void roundArea(lv_disp_drv_t *,lv_area_t *a) {a->x1&=~1;a->y1&=~1;a->x2|=1;a->y2|=1;}
+void restoreCache() {
+  cacheReady=LittleFS.begin(true);
+  if(!cacheReady)return;
+  auto file=LittleFS.open("/snapshot.json","r");
+  if(!file || file.size()>=MAX_LINE*2)return;
+  lineLength=file.readBytes(lineBuffer,file.size());file.close();lineBuffer[lineLength]=0;
+  cachedSnapshot=cJSON_Parse(lineBuffer);
+  restoringCache=true;receiveLine();restoringCache=false;lineLength=0;
+  if(received) {
+    lastCommunicationUnix=clockBase;
+    // ESP RTC system time survives deep sleep; a cold boot has no valid time.
+    timeval tv;gettimeofday(&tv,nullptr);
+    uint64_t wall=uint64_t(tv.tv_sec)*1000+tv.tv_usec/1000;
+    if(sleepMarker==SLEEP_MARKER && wall>=clockBase)clockBase=wall;
+    else received=false; // keep cached content, but don't invent current time/freshness
+    int64_t success=-1,started=-1;
+    optionalTime(cachedSnapshot,"magpie_last_success_ms",success);
+    optionalTime(cachedSnapshot,"magpie_monitor_started_ms",started);
+    QuotaPage::connectionTime(success,started);
+  }
+  if(!haveTasks && !cJSON_HasObjectItem(cachedSnapshot,"quota")) {cJSON_Delete(cachedSnapshot);cachedSnapshot=nullptr;}
+  pendingHello=true;
+}
+void saveCache() {
+  if(!cacheReady||!cacheChanged||!cachedSnapshot)return;
+  char *json=cJSON_PrintUnformatted(cachedSnapshot);if(!json)return;
+  auto file=LittleFS.open("/snapshot.tmp","w");size_t length=strlen(json);
+  bool ok=file && file.write((const uint8_t*)json,length)==length;
+  file.close();free(json);
+  if(ok && LittleFS.rename("/snapshot.tmp","/snapshot.json"))cacheChanged=false;
+}
+void enterDeepSleep(bool fromTimer=false) {
+  // Never enter with BOOT already held: ext0 is level triggered.
+  if(digitalRead(0)==LOW)return;
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  if(esp_sleep_enable_ext0_wakeup(GPIO_NUM_0,0)!=ESP_OK)return;
+  rtc_gpio_pullup_en(GPIO_NUM_0);rtc_gpio_pulldown_dis(GPIO_NUM_0);
+  uint32_t interval=SettingsPage::timingMs(3);
+  if(interval && esp_sleep_enable_timer_wakeup(uint64_t(interval)*1000)!=ESP_OK)return;
+  if(!fromTimer) {
+    saveCache();
+    auto active=lv_tileview_get_tile_act(pages);savedPage=active==quotaTile?1:active==settingsTile?2:0;
+    if(touchReady)touch.sleep();
+    report("deep_sleep");
+  }
+  // Keep PMU charging and hardware PWR shutdown configuration unchanged.
+  sleepMarker=SLEEP_MARKER;
+  Wire.end();
+  esp_deep_sleep_start();
+}
+void beginDisplay() {
+  if(displayReady)return;
+  display.begin();bus.writeC8D8(0x36,0xA0);display.setBrightness(0);display.fillScreen(0);
+  displayReady=true;
+}
+
 }
 
 void hudSetup() {
-  // Buffer a complete allowed snapshot while a QSPI flush is in progress.
-  Serial.setRxBufferSize(128*1024);Serial.begin(115200);
-  pinMode(18,INPUT_PULLUP);powerPolicy.begin(millis(),120000,false);
-  pinMode(0,INPUT_PULLUP);bootButton.begin(millis(),digitalRead(0)==LOW);
-  attachInterrupt(digitalPinToInterrupt(0),onBoot,CHANGE);
+  auto cause=esp_sleep_get_wakeup_cause();
+  bool timerWake=cause==ESP_SLEEP_WAKEUP_TIMER;
+  bool buttonWake=cause==ESP_SLEEP_WAKEUP_EXT0;
+  rtc_gpio_deinit(GPIO_NUM_0);pinMode(0,INPUT_PULLUP);
+  SettingsPage::load();
   Wire.begin(15,14);
   pmuReady=pmu.begin(Wire,AXP2101_SLAVE_ADDRESS,15,14);
+  // Minimal timer path: no panel, LVGL, cache or Serial initialization.
+  if(timerWake && pmuReady && !pmu.isVbusGood() && digitalRead(0)==HIGH)enterDeepSleep(true);
+  bool startDark=timerWake && digitalRead(0)==HIGH;
+  Serial.setRxBufferSize(128*1024);Serial.begin(115200);
+  pinMode(18,INPUT_PULLUP);
+  powerPolicy.begin(millis(),SettingsPage::timingMs(0)+SettingsPage::timingMs(1),false);
+  if(startDark)powerPolicy.startOff(millis());
+  bootWakeConsumed=buttonWake || digitalRead(0)==LOW;
+  bootButton.begin(millis(),digitalRead(0)==LOW);
+  attachInterrupt(digitalPinToInterrupt(0),onBoot,CHANGE);
   if(pmuReady) {pmu.enableBattDetection();pmu.enableBattVoltageMeasure();pmu.enableVbusVoltageMeasure();
-    // Remove our former PWR short-press subscription, leaving shutdown intact.
     pmu.disableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);pmu.clearIrqStatus();
   }
   touch.setPins(40,11);touchReady=touch.begin(Wire,CST92XX_SLAVE_ADDRESS,15,14);
   if(touchReady) {touch.setMaxCoordinates(480,480);touch.setSwapXY(true);touch.setMirrorXY(true,false);pinMode(11,INPUT_PULLUP);attachInterrupt(digitalPinToInterrupt(11),onTouch,FALLING);}
-  SettingsPage::load();
-  display.begin();bus.writeC8D8(0x36,0xA0);display.setBrightness((SettingsPage::brightness()*255+50)/100);display.fillScreen(0);
-  lineBuffer=(char*)ps_malloc(MAX_LINE);
+  if(!startDark)beginDisplay();
+  lineBuffer=(char*)ps_malloc(MAX_LINE*2);
   pixels=(lv_color_t*)heap_caps_malloc(480*40*sizeof(lv_color_t),MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);
   if(!lineBuffer||!pixels||!saverFrame.begin(GFX_SKIP_OUTPUT_BEGIN)) {display.displayOff();while(true) delay(1000);}
   lv_init();hud_fonts_init();
   lv_disp_draw_buf_init(&drawBuffer,pixels,nullptr,480*40);
   static lv_disp_drv_t driver;lv_disp_drv_init(&driver);driver.hor_res=480;driver.ver_res=480;driver.draw_buf=&drawBuffer;driver.flush_cb=flush;driver.rounder_cb=roundArea;lv_disp_drv_register(&driver);
   static lv_indev_drv_t indev;lv_indev_drv_init(&indev);indev.type=LV_INDEV_TYPE_POINTER;indev.read_cb=input;lv_indev_drv_register(&indev);
-  buildUi();updateHeader();report("boot");
+  restoreCache();buildUi();
+  if(sleepMarker==SLEEP_MARKER && savedPage<3)lv_obj_set_tile_id(pages,savedPage,0,LV_ANIM_OFF);
+  updateHeader();
+  if(!startDark)display.setBrightness((SettingsPage::brightness()*255+50)/100);
+  report(startDark?"timer_usb_wake":"boot");
 }
 void hudLoop() {
   static uint32_t previous=millis(),headerAt=0;
@@ -338,15 +441,16 @@ void hudLoop() {
   if(pendingHello && Serial) {hello();pendingHello=false;}
   readUsb();pollTouch();
   if(!touchPressed) suppressTouchUntilRelease=false;
+  powerPolicy.setIdleMs(SettingsPage::timingMs(0)+SettingsPage::timingMs(1));
   auto action=powerPolicy.update(now,digitalRead(18)==LOW,touchActivity);touchActivity=false;
   if(readBootShortPress()) {
-    auto bootAction=powerPolicy.cycleDisplay(now);
+    auto bootAction=powerPolicy.cycleDisplay(now,SettingsPage::timingMs(0));
     if(bootAction!=HudBuddyPower::Action::None) action=bootAction;
     report("boot_short");
   }
   if(action==HudBuddyPower::Action::Sleep) {display.setBrightness(0);display.displayOff();touchPressed=false;report("sleep");}
-  if(action==HudBuddyPower::Action::Wake) {display.displayOn();lv_obj_invalidate(lv_scr_act());display.setBrightness((SettingsPage::brightness()*255+50)/100);touchPressed=false;report("wake");}
-  bool nextSaver=powerPolicy.awake() && powerPolicy.idleFor(now)>=60000;
+  if(action==HudBuddyPower::Action::Wake) {beginDisplay();display.displayOn();lv_obj_invalidate(lv_scr_act());display.setBrightness((SettingsPage::brightness()*255+50)/100);touchPressed=false;report("wake");}
+  bool nextSaver=powerPolicy.awake() && powerPolicy.idleFor(now)>=SettingsPage::timingMs(0);
   if(nextSaver!=screensaver) {
     screensaver=nextSaver;
     if(screensaver) {saverStarted=now;saverFrameAt=now-40;report("screensaver");}
@@ -365,6 +469,11 @@ void hudLoop() {
       lv_timer_handler();
       updateNavigation();
     }
+  }
+  static uint32_t supplyChecked=0;
+  if(!powerPolicy.awake() && pmuReady && uint32_t(now-supplyChecked)>=1000) {
+    supplyChecked=now;
+    if(powerPolicy.deepSleepDue(now,SettingsPage::timingMs(2),pmu.isVbusGood()))enterDeepSleep();
   }
   delay(3);
 }

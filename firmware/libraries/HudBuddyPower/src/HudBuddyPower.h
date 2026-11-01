@@ -29,6 +29,7 @@ class HudBuddyPower {
       if (pressed_ || touch) lastActivity_ = now;
       if (uint32_t(now - lastActivity_) >= idleMs_) {
         awake_ = false;
+        offAt_ = now;
         // A press that started before sleep must not count towards wake.
         holdStarted_ = now;
         return Action::Sleep;
@@ -39,6 +40,11 @@ class HudBuddyPower {
       return Action::Wake;
     }
     return Action::None;
+  }
+  void setIdleMs(uint32_t ms) { idleMs_ = ms; }
+  void startOff(uint32_t now) { awake_ = false; offAt_ = now; }
+  bool deepSleepDue(uint32_t now, uint32_t delayMs, bool usbPowered) const {
+    return !awake_ && !usbPowered && uint32_t(now-offAt_) >= delayMs;
   }
   bool awake() const { return awake_; }
   // Formal UI: BOOT cycles work -> screensaver -> display off -> work.
@@ -53,6 +59,7 @@ class HudBuddyPower {
       return Action::None;
     }
     awake_ = false;
+    offAt_ = now;
     holdStarted_ = now;
     return Action::Sleep;
   }
@@ -61,5 +68,6 @@ class HudBuddyPower {
   bool awake_ = true, rawPressed_ = false, pressed_ = false;
   bool userHoldWake_ = true;
   uint32_t lastActivity_ = 0, rawChanged_ = 0, holdStarted_ = 0;
+  uint32_t offAt_ = 0;
   uint32_t idleMs_ = kIdleMs;
 };

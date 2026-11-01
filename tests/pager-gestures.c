@@ -27,14 +27,30 @@ int main(void) {
  drag(390,200,70,200);assert(lv_tileview_get_tile_act(pager)==b);
  drag(70,200,390,200);assert(lv_tileview_get_tile_act(pager)==b);
  lv_obj_t *slider=lv_slider_create(b);lv_obj_set_pos(slider,60,120);lv_obj_set_size(slider,350,16);
+ lv_obj_add_flag(slider,LV_OBJ_FLAG_ADV_HITTEST);lv_obj_set_ext_click_area(slider,20);
  lv_slider_set_range(slider,5,50);lv_slider_set_value(slider,5,LV_ANIM_OFF);
  lv_obj_clear_flag(slider,LV_OBJ_FLAG_SCROLL_CHAIN_HOR);tick(5);
+ drag(300,128,300,128);assert(lv_slider_get_value(slider)==5);
  drag(65,128,400,128);assert(lv_slider_get_value(slider)>40);assert(lv_tileview_get_tile_act(pager)==b);
  lv_obj_t *list=lv_obj_create(b);lv_obj_set_pos(list,20,180);lv_obj_set_size(list,420,190);
  lv_obj_set_scroll_dir(list,LV_DIR_VER);lv_obj_clear_flag(list,LV_OBJ_FLAG_SCROLL_CHAIN_HOR);
  lv_obj_t *content=lv_obj_create(list);lv_obj_set_size(content,300,600);tick(5);
  drag(200,340,200,220);assert(lv_obj_get_scroll_y(list)>20);assert(lv_tileview_get_tile_act(pager)==b);
+ // The time slider track must pass a vertical drag through to its parent.
+ lv_obj_del(content);lv_obj_scroll_to_y(list,0,LV_ANIM_OFF);
+ lv_obj_set_style_pad_all(list,0,0);
+ content=lv_obj_create(list);lv_obj_set_pos(content,0,550);lv_obj_set_size(content,10,10);
+ lv_obj_t *timeSlider=lv_slider_create(list);lv_obj_set_pos(timeSlider,30,70);lv_obj_set_size(timeSlider,350,16);
+ lv_slider_set_range(timeSlider,0,5);lv_slider_set_value(timeSlider,1,LV_ANIM_OFF);
+ lv_obj_add_flag(timeSlider,LV_OBJ_FLAG_ADV_HITTEST);lv_obj_set_ext_click_area(timeSlider,20);
+ lv_obj_clear_flag(timeSlider,LV_OBJ_FLAG_SCROLL_CHAIN_HOR|LV_OBJ_FLAG_GESTURE_BUBBLE);tick(5);
+ lv_area_t area;lv_obj_get_coords(timeSlider,&area);
+ int trackX=area.x2-30,trackY=(area.y1+area.y2)/2;
+ drag(trackX,trackY,trackX,trackY);assert(lv_slider_get_value(timeSlider)==1);
+ drag(trackX,trackY,trackX,trackY-100);
+ assert(lv_slider_get_value(timeSlider)==1);assert(lv_obj_get_scroll_y(list)>20);
+ assert(lv_tileview_get_tile_act(pager)==b);
  lv_obj_del(slider);lv_obj_del(list);lv_obj_add_flag(pager,LV_OBJ_FLAG_SCROLLABLE);tick(5);
  drag(70,200,390,200);assert(lv_tileview_get_tile_act(pager)==a);
- puts("Pager lock, slider, vertical scroll and return-to-main unlock passed");
+ puts("Pager lock, knob drag, track tap/vertical scroll and return-to-main unlock passed");
 }

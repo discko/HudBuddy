@@ -1,5 +1,6 @@
 #include <cassert>
 #include "../firmware/libraries/HudBuddyPower/src/HudBuddyPower.h"
+#include "../firmware/hud/PowerSettings.h"
 using A = HudBuddyPower::Action;
 int main() {
   HudBuddyPower p; p.begin(0);
@@ -61,4 +62,39 @@ int main() {
   assert(p.idleFor(0xfffffff8u)==60000);
   assert(p.cycleDisplay(10)==A::Sleep);
   assert(p.cycleDisplay(100)==A::Wake);
+  // All supported work/saver durations; BOOT off always gets its own grace.
+  for(auto work:PowerSettings::seconds)for(auto saver:PowerSettings::seconds) {
+    p.begin(100,(work+saver)*1000,false);
+    assert(p.update(100+(work+saver)*1000-1,false,false)==A::None);
+    uint32_t off=100+(work+saver)*1000;
+    assert(p.update(off,false,false)==A::Sleep);
+    for(auto grace:PowerSettings::seconds) {
+      assert(!p.deepSleepDue(off+grace*1000-1,grace*1000,false));
+      assert(p.deepSleepDue(off+grace*1000,grace*1000,false));
+      assert(!p.deepSleepDue(off+grace*1000,grace*1000,true));
+    }
+    assert(p.cycleDisplay(off+500,work*1000)==A::Wake);
+    assert(!p.deepSleepDue(off+999999,30000,false));
+    assert(p.cycleDisplay(off+600,work*1000)==A::None);
+    assert(p.idleFor(off+600)==work*1000);
+    assert(p.cycleDisplay(off+700,work*1000)==A::Sleep);
+    assert(!p.deepSleepDue(off+700+59999,60000,false));
+    assert(p.deepSleepDue(off+700+60000,60000,false));
+  }
+  p.begin(0,120000,false);p.startOff(0xfffffff0u);
+  assert(!p.deepSleepDue(uint32_t(0xfffffff0u+59999),60000,false));
+  assert(p.deepSleepDue(uint32_t(0xfffffff0u+60000),60000,false));
+  // USB/touch/USER cannot extend off grace or wake formal firmware.
+  p.startOff(0);p.update(4000,true,true);p.update(9000,true,true);
+  assert(p.deepSleepDue(60000,60000,false));
+  assert(!p.deepSleepDue(60000,60000,true));
+  assert(p.cycleDisplay(60001)==A::Wake);
+  p.update(60002,false,false);p.update(60032,false,false);
+  p.setIdleMs(60000);assert(p.update(120002,false,false)==A::Sleep);
+  for(unsigned field=0;field<4;++field) {
+    assert(PowerSettings::validate(field,17)==(field==3?30:60));
+    for(auto v:PowerSettings::seconds)if(field<3)assert(PowerSettings::validate(field,v)==v);
+  }
+  for(auto v:PowerSettings::minutes)assert(PowerSettings::validate(3,v)==v);
+  assert(PowerSettings::validate(0,0)==60);
 }

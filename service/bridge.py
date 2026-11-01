@@ -395,6 +395,7 @@ class Bridge:
                 if not isinstance(incoming, dict):
                     continue
                 if incoming.get("type") == "hello" and incoming.get("protocol") == PROTOCOL and incoming.get("device") == "HudBuddy":
+                    LOG.info("Buddy firmware: %s", incoming.get("firmware", "unknown"))
                     # Startup hello often arrives after our initial snapshot. Do not
                     # duplicate an in-flight snapshot; a later hello denotes a reset.
                     if self.pending_seq is None:
