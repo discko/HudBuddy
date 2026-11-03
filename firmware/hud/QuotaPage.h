@@ -17,6 +17,7 @@ struct Data {
 bool parse(cJSON *raw,Data &out);
 void set(Data data);
 bool isDetail();
+void closeDetail();
 void connectionTime(int64_t lastSuccess,int64_t firstAttempt);
 void begin(lv_obj_t *parent,bool (*allowsClick)());
 void update(int64_t now,int timezoneMinutes);

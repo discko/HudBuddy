@@ -41,6 +41,11 @@ class HudBuddyPower {
     }
     return Action::None;
   }
+  // Explicit task notification only; periodic data/animations never call this.
+  Action notify(uint32_t now) {
+    bool wasAwake=awake_;awake_=true;lastActivity_=now;
+    return wasAwake?Action::None:Action::Wake;
+  }
   void setIdleMs(uint32_t ms) { idleMs_ = ms; }
   void startOff(uint32_t now) { awake_ = false; offAt_ = now; }
   bool deepSleepDue(uint32_t now, uint32_t delayMs, bool usbPowered) const {

@@ -37,8 +37,7 @@ lv_obj_t *label(lv_obj_t *p,const char *s,int x,int y,int w,bool title=false) {
  lv_obj_set_style_text_color(o,lv_color_hex(0xe8eaed),0);lv_obj_set_style_text_line_space(o,6,0);return o;
 }
 void back(lv_event_t *) {
- if(!clickAllowed())return;detail=false;
- lv_obj_add_flag(panel,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(home,LV_OBJ_FLAG_HIDDEN);
+ if(!clickAllowed())return;closeDetail();
 }
 void sliderEvent(lv_event_t *e) {
  if(lv_event_get_code(e)==LV_EVENT_VALUE_CHANGED) {
@@ -101,14 +100,18 @@ void load() {storage=prefs.begin("hudbuddy",false);level=storage?prefs.getUChar(
 int brightness() {return level;}
 uint32_t timingMs(unsigned field) {return uint32_t(times[field])*(field==3?60000:1000);}
 bool isDetail() {return detail;}
+void closeDetail() {
+ detail=false;
+ lv_obj_add_flag(panel,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(home,LV_OBJ_FLAG_HIDDEN);
+}
 void begin(lv_obj_t *parent,bool (*canClick)(),void (*applyBrightness)(int)) {
  clickAllowed=canClick;apply=applyBrightness;
  home=box(parent,26,0,428,390);label(home,"设置",8,10,390,true);
  const char *names[]={"屏幕亮度","电源与屏保","设备信息"};
  const char *hints[]={"调节显示亮度","屏保、息屏与唤醒","关于 HudBuddy"};
  for(int i=0;i<3;++i) {
-  auto row=box(home,0,62+i*102,428,94);lv_obj_add_flag(row,LV_OBJ_FLAG_CLICKABLE);
-  label(row,names[i],8,4,330,true);auto hint=label(row,hints[i],8,44,350);
+  auto row=box(home,0,58+i*82,428,80);lv_obj_add_flag(row,LV_OBJ_FLAG_CLICKABLE);
+  label(row,names[i],8,2,330,true);auto hint=label(row,hints[i],8,38,350);
   lv_obj_set_style_text_color(hint,lv_color_hex(0x949eac),0);label(row,"›",385,20,30);
   lv_obj_add_event_cb(row,open,LV_EVENT_CLICKED,reinterpret_cast<void*>(uintptr_t(i)));
  }

@@ -143,6 +143,7 @@ bool parse(cJSON *raw,Data &out) {
  return true;
 }
 bool isDetail() {return detail;}
+void closeDetail(){switchDetail(false);}
 void set(Data data) {current=std::move(data);received=true;dirty=true;}
 void connectionTime(int64_t lastSuccess,int64_t firstAttempt) {
  if(lastSuccess>=0)current.lastSuccess=lastSuccess;

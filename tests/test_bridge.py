@@ -69,10 +69,27 @@ class ProjectionTests(unittest.TestCase):
                           card("done", "done"), card("paused", "paused"))
         self.assertEqual([t["id"] for t in tasks], ["z", "a"])
         self.assertEqual(set(tasks[0]), {"id", "title", "status", "summary", "updated_at",
-                                        "status_label", "status_color", "status_background"})
+                                        "status_label", "status_color", "status_background", "waiting_for_input", "waiting_input_reason"})
         self.assertEqual((tasks[0]["status_label"], tasks[0]["status_color"], tasks[0]["status_background"]),
                          ("等待中", "#e2c48b", "#443a27"))
         self.assertEqual(tasks[1]["status_color"], "#a5c4ee")
+
+    def test_wait_input_fields_are_typed_and_projected(self):
+        task = task_list(card(waiting_for_input=True, waiting_input_reason="确认下一步"))[0]
+        self.assertIs(task["waiting_for_input"], True)
+        self.assertEqual(task["waiting_input_reason"], "确认下一步")
+        self.assertIs(task_list(card())[0]["waiting_for_input"], False)
+        for value in ("true", 1, None):
+            with self.assertRaises(b.BridgeError):
+                task_list(card(waiting_for_input=value))
+
+    def test_business_changes_ignore_timestamp_but_include_removal_and_reason(self):
+        old = task_list(card("a"), card("b"))
+        self.assertEqual(b.task_changes(None, old), [])
+        self.assertEqual(b.task_changes(old, task_list(card("b"), card("a", updated_at=99))), [])
+        self.assertEqual(b.task_changes(old, task_list(card("a", waiting_for_input=True), card("c"))), ["a", "c", "b"])
+        current = task_list(card("a", waiting_input_reason="更新说明"), card("b"))
+        self.assertEqual(b.task_changes(old, current), ["a"])
 
     def test_readable_summary_retains_text_and_code(self):
         original = "# 标题\n- [x] 查看 [文档](https://example.com/path) 与 `字段`\n```python\n`literal` [x](https://code.test)\n```\n嵌套 [文字](https://a.test/a(b)) 和 a_b、2*3\n最后\u0000"
@@ -177,6 +194,51 @@ class StateTests(unittest.TestCase):
         self.assertEqual(self.bridge.seq, 2)
         self.assertEqual(self.ports[0].writes[-1]["tasks"][0]["summary"], "new")
         self.assertEqual(self.bridge.heartbeat_due, 600)
+
+    def test_change_commands_are_transient_and_do_not_use_ack_baseline(self):
+        self.attach()
+        self.assertEqual(self.ports[0].writes[-1]["changed_task_ids"], [])
+        self.ack()
+        self.client.tasks[0]["waiting_for_input"] = True
+        self.step(60)
+        self.assertEqual(self.ports[0].writes[-1]["changed_task_ids"], ["a"])
+        self.assertTrue(self.ports[0].writes[-1]["tasks"][0]["waiting_for_input"])
+        self.assertEqual(self.bridge.changed_task_ids, [])
+        # No ACK yet: a full re-push still must not repeat the change command.
+        self.bridge.needs_snapshot = True
+        self.step(61)
+        self.assertEqual(self.ports[0].writes[-1]["changed_task_ids"], [])
+        self.ack()
+        self.client.tasks[0]["updated_at"] += 1
+        self.step(120)
+        self.assertEqual(self.bridge.seq, 3)
+        self.bridge.send_heartbeat()
+        self.assertNotIn("changed_task_ids", self.ports[0].writes[-1])
+        # Health/quota-triggered snapshot reuses tasks but not old commands.
+        self.bridge.needs_snapshot = True
+        self.step(121)
+        self.assertEqual(self.ports[0].writes[-1]["changed_task_ids"], [])
+
+    def test_reorder_pushes_without_alert_and_timestamp_alone_does_not_push(self):
+        self.client.tasks = task_list(card("a"), card("b"))
+        self.attach(); self.ack()
+        self.client.tasks.reverse()
+        self.step(60)
+        self.assertEqual([t["id"] for t in self.ports[-1].writes[-1]["tasks"]], ["b", "a"])
+        self.assertEqual(self.ports[-1].writes[-1]["changed_task_ids"], [])
+        self.ack()
+        self.client.tasks[0]["updated_at"] += 5
+        self.step(120)
+        self.assertEqual(self.bridge.seq, 2)
+
+    def test_change_between_disconnect_and_reconnect_uses_last_query(self):
+        self.attach(); self.ack()
+        self.bridge.set_presence(False)
+        self.client.tasks = []
+        self.bridge.set_presence(True)
+        self.step(100)
+        self.assertEqual(self.ports[-1].writes[-1]["changed_task_ids"], ["a"])
+        self.assertEqual(self.ports[-1].writes[-1]["tasks"], [])
 
     def test_detach_stops_timers_and_reconnect_queries_immediately(self):
         self.attach()
@@ -322,6 +384,8 @@ class StateTests(unittest.TestCase):
         self.assertTrue(port.closed)
         self.step(60.5)
         self.assertEqual(self.ports[1].writes[-1]["tasks"][0]["summary"], "change")
+        self.assertEqual(self.ports[1].writes[-1]["changed_task_ids"], ["a"])
+        self.assertEqual(self.bridge.changed_task_ids, [])
 
     def test_hello_coalesces_in_flight_snapshot_and_handles_reset(self):
         self.attach()
@@ -413,7 +477,7 @@ class ClientTests(unittest.TestCase):
         self.response_file.write_text(json.dumps({"ok": True, "response": {"op": "list_tasks", "data": {"tasks": [card()]}}}), encoding="utf-8")
         self.cli.write_text(f"#!{sys.executable}\n" + '''import json, pathlib, sys
 if sys.argv[1:] == ['info', '--json']:
-    print(json.dumps({'ok': True, 'info': {'cli_version': '0.2.0', 'api_version': 3, 'bundled_skill_version': '0.2.2'}}))
+    print(json.dumps({'ok': True, 'info': {'cli_version': '0.3.0', 'api_version': 4, 'bundled_skill_version': '0.3.0'}}))
 elif sys.argv[1:] == ['request', '--stdin']:
     request = json.load(sys.stdin)
     assert request == {'op': 'list_tasks', 'args': {'filter': 'all'}}

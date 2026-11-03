@@ -21,6 +21,8 @@
 #include "SettingsPage.h"
 #include "TapGuard.h"
 #include "ShortPressButton.h"
+#include "TaskNotifications.h"
+#include "NotificationSound.h"
 #include <DogScene.h>
 
 namespace {
@@ -55,10 +57,15 @@ int timezoneMinutes=480;
 char *lineBuffer=nullptr;
 size_t lineLength=0;
 bool droppingLine=false;
-struct Task { String id,title,status,summary; int64_t updated; };
+struct Task { String id,title,status,summary; int64_t updated; bool waitingForInput=false; };
+TaskNotifications<String> notifications;
+bool taskAlertPending=false,chimePending=false;
+String alertTarget;
+struct RowAlert {lv_obj_t *dot;String id;};
+std::vector<RowAlert> rowAlerts;
 std::vector<Task> tasks;
 String selectedId;
-int savedListY=0;
+int savedListY=0,requestedListY=-1;
 lv_obj_t *pages, *hudTile, *quotaTile, *settingsTile, *listPanel, *detailPanel, *detailScroll;
 lv_obj_t *timeLabel, *usbLabel, *batteryLabel, *freshDot, *pageDot1,*pageDot2,*pageDot3;
 lv_disp_draw_buf_t drawBuffer;
@@ -112,7 +119,9 @@ void scrollStyle(lv_obj_t *o) {
 void renderTasks() {
   dirty=false;
   if(!lv_obj_has_flag(listPanel,LV_OBJ_FLAG_HIDDEN)) savedListY=lv_obj_get_scroll_y(listPanel);
+  if(requestedListY>=0){savedListY=requestedListY;requestedListY=-1;}
   int detailY=detailScroll?lv_obj_get_scroll_y(detailScroll):0;
+  rowAlerts.clear();
   lv_obj_clean(listPanel); lv_obj_clean(detailPanel); detailScroll=nullptr;
   const Task *selected=nullptr;
   for(const auto &t:tasks) if(t.id==selectedId) selected=&t;
@@ -154,6 +163,18 @@ void renderTasks() {
       lv_label_set_long_mode(t,LV_LABEL_LONG_SCROLL_CIRCULAR);
       lv_obj_set_style_anim_speed(t,32,0);
       badge(row,tasks[i],8,53);
+      auto red=box(row,118,66,10,10);lv_obj_set_style_radius(red,5,0);
+      lv_obj_set_style_bg_color(red,lv_color_hex(0xef7379),0);lv_obj_set_style_bg_opa(red,LV_OPA_COVER,0);
+      if(!notifications.red(tasks[i].id,millis()))lv_obj_add_flag(red,LV_OBJ_FLAG_HIDDEN);
+      rowAlerts.push_back({red,tasks[i].id});
+      if(tasks[i].waitingForInput) {
+        lv_obj_set_style_border_color(row,lv_color_hex(0xe8c86a),0);lv_obj_set_style_border_width(row,2,0);lv_obj_set_style_radius(row,10,0);
+        auto tag=box(row,306,53,100,36);lv_obj_set_style_bg_color(tag,lv_color_hex(0x443a27),0);lv_obj_set_style_bg_opa(tag,LV_OPA_COVER,0);lv_obj_set_style_radius(tag,8,0);
+        auto caption=label(tag,"待输入",0,0,0,&hud_font_24,0xe8c86a);lv_obj_center(caption);
+        lv_anim_t pulse;lv_anim_init(&pulse);lv_anim_set_var(&pulse,row);
+        lv_anim_set_exec_cb(&pulse,[](void *o,int32_t opacity){lv_obj_set_style_border_opa((lv_obj_t*)o,opacity,0);});
+        lv_anim_set_values(&pulse,100,255);lv_anim_set_time(&pulse,1100);lv_anim_set_playback_time(&pulse,1100);lv_anim_set_repeat_count(&pulse,LV_ANIM_REPEAT_INFINITE);lv_anim_start(&pulse);
+      }
       auto line=box(row,8,106,394,1); lv_obj_set_style_bg_color(line,lv_color_hex(0x202329),0); lv_obj_set_style_bg_opa(line,LV_OPA_COVER,0);
     }
     lv_obj_update_layout(listPanel); lv_obj_scroll_to_y(listPanel,savedListY,LV_ANIM_OFF);
@@ -205,6 +226,7 @@ void receiveLine() {
   bool heartbeat=type && strcmp(type,"heartbeat")==0;
   valid=valid && (snapshot||heartbeat);
   std::vector<Task> next;
+  std::vector<String> changedIds;
   QuotaPage::Data nextQuota;
   bool hasTasks=cJSON_HasObjectItem(root,"tasks"),hasQuota=cJSON_HasObjectItem(root,"quota");
   int64_t magpieSuccess=-1,magpieStarted=-1;
@@ -213,6 +235,14 @@ void receiveLine() {
     auto array=cJSON_GetObjectItemCaseSensitive(root,"tasks");
     valid=number(root,"seq",seq) && seq>=0 && seq<=9007199254740991.0 && (hasTasks||hasQuota);
     if(valid && hasTasks)valid=cJSON_IsArray(array) && cJSON_GetArraySize(array)<=64;
+    auto changed=cJSON_GetObjectItemCaseSensitive(root,"changed_task_ids");
+    if(valid && changed) {
+      valid=hasTasks && cJSON_IsArray(changed) && cJSON_GetArraySize(changed)<=128;
+      if(valid) {cJSON *id;cJSON_ArrayForEach(id,changed){
+        if(!cJSON_IsString(id)||!id->valuestring[0]){valid=false;break;}
+        changedIds.push_back(id->valuestring);
+      }}
+    }
     if(valid && hasTasks) {
       next.reserve(cJSON_GetArraySize(array));
       cJSON *item;
@@ -222,7 +252,9 @@ void receiveLine() {
         if(!id||!title||!status||!summary||!number(item,"updated_at",updated)||updated<0||!id[0]||(strcmp(status,"doing") && strcmp(status,"waiting"))) {valid=false;break;}
         for(const auto &t:next) if(t.id==id) valid=false;
         if(!valid) break;
-        next.push_back({id,title,status,summary,int64_t(updated)});
+        auto wfi=cJSON_GetObjectItemCaseSensitive(item,"waiting_for_input");
+        if(wfi && !cJSON_IsBool(wfi)){valid=false;break;}
+        next.push_back({id,title,status,summary,int64_t(updated),cJSON_IsTrue(wfi)});
       }
     }
     if(valid && hasQuota)valid=QuotaPage::parse(cJSON_GetObjectItemCaseSensitive(root,"quota"),nextQuota);
@@ -255,7 +287,12 @@ void receiveLine() {
     if(snapshot) {
       // A host push completes the boot handshake even before CDC is ready.
       pendingHello=false;
-      if(hasTasks){tasks.swap(next);haveTasks=true;dirty=true;}
+      if(hasTasks){
+        auto alert=notifications.apply(next,changedIds,millis(),restoringCache);
+        if(alert.wake){taskAlertPending=true;if(alert.target.length())alertTarget=alert.target;}
+        if(alert.chime)chimePending=true;
+        tasks.swap(next);haveTasks=true;dirty=true;
+      }
       if(hasQuota){if(restoringCache)nextQuota.stale=true;QuotaPage::set(std::move(nextQuota));}
       if(!restoringCache) {Serial.printf("{\"type\":\"ack\",\"seq\":%.0f}\n",seq);report("snapshot");}
     }
@@ -374,6 +411,7 @@ void enterDeepSleep(bool fromTimer=false) {
   uint32_t interval=SettingsPage::timingMs(3);
   if(interval && esp_sleep_enable_timer_wakeup(uint64_t(interval)*1000)!=ESP_OK)return;
   if(!fromTimer) {
+    NotificationSound::stop();
     saveCache();
     auto active=lv_tileview_get_tile_act(pages);savedPage=active==quotaTile?1:active==settingsTile?2:0;
     if(touchReady)touch.sleep();
@@ -393,6 +431,7 @@ void beginDisplay() {
 }
 
 void hudSetup() {
+  NotificationSound::begin();
   auto cause=esp_sleep_get_wakeup_cause();
   bool timerWake=cause==ESP_SLEEP_WAKEUP_TIMER;
   bool buttonWake=cause==ESP_SLEEP_WAKEUP_EXT0;
@@ -440,9 +479,21 @@ void hudLoop() {
   connected=usb;
   if(pendingHello && Serial) {hello();pendingHello=false;}
   readUsb();pollTouch();
+  // USB parsing timestamps new notifications; expiry/power checks must not use
+  // the earlier loop-start tick (unsigned subtraction would expire them).
+  now=millis();
   if(!touchPressed) suppressTouchUntilRelease=false;
   powerPolicy.setIdleMs(SettingsPage::timingMs(0)+SettingsPage::timingMs(1));
   auto action=powerPolicy.update(now,digitalRead(18)==LOW,touchActivity);touchActivity=false;
+  if(taskAlertPending) {
+    taskAlertPending=false;action=powerPolicy.notify(now);
+    selectedId="";screensaver=false;SettingsPage::closeDetail();QuotaPage::closeDetail();
+    lv_obj_set_tile_id(pages,0,0,LV_ANIM_OFF);requestedListY=0;
+    for(size_t i=0;i<tasks.size();++i)if(tasks[i].id==alertTarget){requestedListY=i*108;break;}
+    alertTarget="";dirty=true;touchPressed=false;suppressTouchUntilRelease=true;
+    lv_obj_invalidate(lv_scr_act());report("task_alert");
+    if(chimePending){chimePending=false;NotificationSound::notify();}
+  }
   if(readBootShortPress()) {
     auto bootAction=powerPolicy.cycleDisplay(now,SettingsPage::timingMs(0));
     if(bootAction!=HudBuddyPower::Action::None) action=bootAction;
@@ -463,6 +514,9 @@ void hudLoop() {
       }
     } else {
       if(dirty) renderTasks();
+      if(notifications.expire(now))for(const auto &row:rowAlerts)
+        if(!notifications.red(row.id,now))lv_obj_add_flag(row.dot,LV_OBJ_FLAG_HIDDEN);
+
       QuotaPage::update(received?int64_t(clockBase+nowMs()-clockAt):0,timezoneMinutes);
       if(uint32_t(now-headerAt)>=500) {headerAt=now;updateHeader();}
       updateNavigation();
@@ -470,6 +524,7 @@ void hudLoop() {
       updateNavigation();
     }
   }
+  NotificationSound::update(millis());
   static uint32_t supplyChecked=0;
   if(!powerPolicy.awake() && pmuReady && uint32_t(now-supplyChecked)>=1000) {
     supplyChecked=now;

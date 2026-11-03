@@ -106,13 +106,30 @@ def project_tasks(data: Any) -> list[dict[str, Any]]:
             raise BridgeError("list_tasks returned invalid task text")
         if not task["id"] or type(task.get("updated_at")) is not int:
             raise BridgeError("list_tasks returned invalid task id/updated_at")
+        if type(task.get("waiting_for_input", False)) is not bool:
+            raise BridgeError("list_tasks returned invalid waiting_for_input")
+        if not isinstance(task.get("waiting_input_reason", ""), str):
+            raise BridgeError("list_tasks returned invalid waiting_input_reason")
         label, color, background = STATUS[task["status"]]
         tasks.append({"id": task["id"], "title": task["title"], "status": task["status"],
                       "summary": readable_summary(task["summary"]), "updated_at": task["updated_at"],
+                      "waiting_for_input": task.get("waiting_for_input", False),
+                      "waiting_input_reason": task.get("waiting_input_reason", ""),
                       "status_label": label, "status_color": color, "status_background": background})
     if len(tasks) > MAX_TASKS:
         raise BridgeError(f"{len(tasks)} active tasks exceeds device limit {MAX_TASKS}; keeping previous snapshot")
     return tasks
+
+
+def task_changes(previous: list[dict[str, Any]] | None, current: list[dict[str, Any]]) -> list[str]:
+    """Compare HUD query results, not device ACKs. A cold service has no changes."""
+    if previous is None:
+        return []
+    def business(task):
+        return {key: value for key, value in task.items() if key != "updated_at"}
+    old = {task["id"]: business(task) for task in previous}
+    new = {task["id"]: business(task) for task in current}
+    return [key for key, value in new.items() if old.get(key) != value] + [key for key in old if key not in new]
 
 
 class HudClient:
@@ -205,6 +222,7 @@ class Bridge:
         self.retry_due: float | None = None
         self.retry_index = 0
         self.tasks: list[dict[str, Any]] | None = None
+        self.changed_task_ids: list[str] = []
         self.hud_ok = False
         self.quota: dict[str, Any] | None = None
         if quota_client is not None and getattr(quota_client, "cached_quota", None) is not None:
@@ -245,6 +263,7 @@ class Bridge:
         fields: dict[str, Any] = {"hud_ok": self.hud_ok}
         if self.tasks is not None:
             fields["tasks"] = self.tasks
+            fields["changed_task_ids"] = list(self.changed_task_ids)
         if self.quota is not None:
             fields["quota"] = self.quota
         fields.update(overrides)
@@ -254,7 +273,9 @@ class Bridge:
         LOG.debug("checking HUD tasks")
         try:
             tasks = self.client.fetch()
-            candidate = self.snapshot(tasks=tasks, hud_ok=False)  # Reserve the longer failed-health flag too.
+            changes = task_changes(self.tasks, tasks)
+            pending_changes = list(dict.fromkeys(changes + self.changed_task_ids))[:2 * MAX_TASKS]
+            candidate = self.snapshot(tasks=tasks, changed_task_ids=pending_changes, hud_ok=False)  # Reserve the longer failed-health flag too.
             if self.quota_client is not None and "quota" not in candidate:
                 candidate["quota"] = empty_quota(stale=True)
                 candidate["quota"].update(last_success_ms=MAX_TIME_MS, monitor_started_ms=MAX_TIME_MS)
@@ -271,7 +292,8 @@ class Bridge:
         if self.last_error is not None:
             LOG.info("HUD refresh recovered")
         self.last_error = None
-        changed = tasks != self.tasks or not self.hud_ok
+        changed = bool(changes) or self.tasks is None or not self.hud_ok or [t["id"] for t in tasks] != [t["id"] for t in self.tasks]
+        self.changed_task_ids = pending_changes
         self.tasks = tasks
         self.hud_ok = True
         if changed:
@@ -318,6 +340,7 @@ class Bridge:
         next_seq = self.seq + 1
         self._send(self.snapshot())
         self.seq = next_seq
+        self.changed_task_ids.clear()  # Transient command; never replay on quota/health/hello updates.
         if self.pending_seq is None:
             self.pending_since = self.clock()  # Full write completed; device ACK time starts now.
         self.pending_seq = next_seq

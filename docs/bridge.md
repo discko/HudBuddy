@@ -48,7 +48,7 @@ nohup .tools/python/bin/python -m service.bridge > /tmp/hudbuddy-bridge.log 2>&1
 
 服务启动先调用当前 HUD Skill 的 `scripts/check_compatibility.py --cli <绝对路径>`，通过 `info --json` 校验 Skill manifest 与 CLI/API 版本，兼容才调用业务数据。默认 Skill 检查器路径是 `~/.codex/skills/hud/scripts/check_compatibility.py`；默认 CLI 是 `~/.local/bin/hud-cli`。兼容检查失败退出，不发起 `list_tasks`。
 
-每次 HUD 检查只调用 `list_tasks`，参数为 `{"filter":"all"}`，再筛选 `doing`、`waiting`，保留 API 返回的 HUD 原顺序，不按状态、标题或更新时间重排。每项仅传 `id`、`title`、`status`、`summary`、`updated_at` 及状态显示字段。状态名与色值来自 CodexHud `apps/desktop/src/state.ts` 和 `styles.css` 深色主题：
+每次 HUD 检查只调用 `list_tasks`，参数为 `{"filter":"all"}`，再筛选 `doing`、`waiting`，保留 API 返回的 HUD 原顺序，不按状态、标题或更新时间重排。每项传 `id`、`title`、`status`、`summary`、`updated_at`、`waiting_for_input`（布尔）、`waiting_input_reason`（字符串）及状态显示字段。兼容缺失 WFI 字段的旧数据为 false/空串；收到错误字段类型则保留旧快照。reason 参与服务端变化判断，但设备界面不展示。状态名与色值来自 CodexHud `apps/desktop/src/state.ts` 和 `styles.css` 深色主题：
 
 | status | status_label | status_color | status_background |
 | --- | --- | --- | --- |
@@ -84,7 +84,7 @@ snapshot 带额度时间字段；每 600 秒 heartbeat 额外携带 `magpie_last
 电脑 → 设备 snapshot（字段顺序无意义）：
 
 ```json
-{"type":"snapshot","protocol":1,"unix_ms":1793400000000,"tz_offset_min":480,"seq":1,"tasks":[{"id":"task-id","title":"任务标题","status":"doing","summary":"完整任务说明","updated_at":1793400000000,"status_label":"进行中","status_color":"#a5c4ee","status_background":"#2c3c52"}]}
+{"type":"snapshot","protocol":1,"unix_ms":1793400000000,"tz_offset_min":480,"seq":1,"changed_task_ids":[],"tasks":[{"id":"task-id","title":"任务标题","status":"doing","summary":"完整任务说明","waiting_for_input":false,"waiting_input_reason":"","updated_at":1793400000000,"status_label":"进行中","status_color":"#a5c4ee","status_background":"#2c3c52"}]}
 ```
 
 `unix_ms` 为当前 Unix 毫秒数，`tz_offset_min` 为电脑当前时区距 UTC 的分钟偏移（上海为 480）；`updated_at` 原样保留 HUD Task 的时间字段。`seq` 在单个服务进程内按实际发送的快照递增。`tasks` 与 `quota` 均可选，但至少包含一个；缺省字段在设备上保留原值。`hud_ok` 表示当前 HUD 读取是否成功。任务或额度变化、首次连接/重连、设备重启发来 hello 时发送完整快照，不做增量更新；普通源检查无业务变化时不发送。已有待确认快照时合并 hello，不重复发送。重连时即使 CLI 暂时失败，也会重新发送已有的最后成功快照。
@@ -117,7 +117,7 @@ ack 的 seq 必须匹配当前最近一次发送的 snapshot。无效快照不�
 
 有效 snapshot 与 heartbeat 都以设备接收时刻更新“上次通信”时间，顶部小点按距此时刻的时间差显示：少于 1 分钟蓝色、1–10 分钟绿色、10–60 分钟黄色、1 小时起红色，尚未通信为灰色。普通 HUD 查询未推送时不会更新这个时间。设备不再每 10 秒发送 health 诊断，保留 ACK 及屏保／息屏等事件上报。
 
-USB 数据和心跳不属于用户活动。固件 1.0.0 默认工作页 60 秒到屏保、再 60 秒息屏、息屏后再等 60 秒检查 VBUS，离线则深睡。三个时长可各选 30/60/90/120 秒。深睡默认每 30 分钟检查供电，可选 1/5/10/30/60 分钟或永不。定时唤醒发现供电后恢复 USB，但屏幕保持关闭；BOOT 手动唤醒显示工作页。USB 供电由 AXP2101 检测，与串口枚举、Bridge 是否运行无关。
+心跳、额度与普通数据同步不属于用户活动；下面的有效任务提醒是显式例外。固件 1.1.0 默认工作页 60 秒到屏保、再 60 秒息屏、息屏后再等 60 秒检查 VBUS，离线则深睡。三个时长可各选 30/60/90/120 秒。深睡默认每 30 分钟检查供电，可选 1/5/10/30/60 分钟或永不。定时唤醒发现供电后恢复 USB，但屏幕保持关闭；BOOT 手动唤醒显示工作页。USB 供电由 AXP2101 检测，与串口枚举、Bridge 是否运行无关。
 
 固件深睡前将有效 snapshot 的 tasks/quota 合并缓存至 LittleFS `/snapshot.json`（临时文件后 rename），不会每次心跳写 Flash。深睡 RTC 保持时间；恢复缓存不会更新“最后通信”时间。冷启动缓存可用，但当前时间需等待同步。hello 可带 `firmware` 字段，Bridge 记录该版本；协议版本仍为 1。
 
@@ -128,3 +128,21 @@ USB 数据和心跳不属于用户活动。固件 1.0.0 默认工作页 60 秒�
 ```
 
 测试使用临时 fake CLI、mock serial 和操作系统虚拟 PTY，覆盖额度窗口/卡片/账号选择、缓存权限和原子替换、失败恢复、跨重启最后连通时间、两源独立容错、仅观察时间变化不推送、协议边界、失败保留、任务过滤和顺序、60/600 秒独立计时、离线停止所有工作、目标 USB 身份及增删去重、快速拔插事件保序、移除时 registryID 缓存、6 秒 ACK、重连退避和控制线处理；不访问实机串口。
+
+## 任务更新与等待输入提醒
+
+service 对比上次成功 HUD 查询的任务业务字段，忽略 updated_at；首次无基准时 changed_task_ids=[]。新增、字段变化、退出当前列表的 ID 放入 changed_task_ids，顺序调整只刷新列表、不提醒。标记为瞬时命令：完整串口写入后立即清除，无需等待 ACK，不建立设备 ACK 快照比较基准。部分写失败时保留待发送命令；后续成功发送即清除，额度/健康恢复/hello 重发不会反复携带旧标记。ID 数最多 128（当前及退出的任务），先保留本轮变化。heartbeat 没有该字段；字段存在时要求同时有 tasks。
+
+设备收到非空 changed_task_ids，亮屏、退出屏保和任何详情、切到 HUD 列表，将仍存在的提醒任务滚到可见位置，保持 HUD 顺序；这些行状态徽标后显示 60 秒红点，再次标记重计时。只剩退出任务时仍返回列表，但没有对应红点。设备不比较任务正文。
+
+设备按 ID 比较 waiting_for_input：无/false→true 时同批仅叮一次并返回列表；持续 true 不重复叮、不重复亮屏、不续时；清除时取消强调。WFI 卡片黄色边框缓慢明暗变化，第二行右侧显示“待输入”，不显示 reason。WFI 与红点可共存。缓存恢复只建立本地 WFI 基准，不触发通知；任何之后的上位机快照都按同样规则处理。changed_task_ids 不写入持久缓存，红点计时也不持久化。
+
+有效通知亮屏后重新开始原有工作页/屏保/息屏等待计时。深睡不能直接接收 USB；定时恢复通信后的有效任务提醒仍按上述规则处理。
+
+## 提示音实现
+
+NotificationSound 使用共享 Wire（主循环访问 ES8311）、16 kHz/16 位双声道 I2S TX，MCLK=GPIO42、BCLK=GPIO9、WS=GPIO45、DOUT=GPIO8、功放使能=GPIO46。只创建 TX，不启用 ES7210/录音。ES8311 初始化寄存器依据厂家 07_ES8311 示例，停机依据 [Espressif ES8311 驱动](https://github.com/espressif/esp-adf/blob/master/components/esp_codec_dev/device/es8311/es8311.c) 的模拟路径与时钟关断方式。
+
+WFI 固定使用振幅 12000 的双声提示：启动静音 150 ms，每声有效音频 240 ms，两声起音间隔 300 ms，尾部静音 28 ms，总长 718 ms。codec 固定 -12 dB（寄存器 0xa7）。PCM 整段预装 DMA 后异步播放，DMA 自动清零，730 ms 后回收通道、关闭功放和 codec 时钟，深睡前立即停止。所有 I2C 操作仍在主循环，无跨线程 Wire 访问。设置不再提供试听入口。
+
+验证：scripts/test.sh 覆盖首帧/业务字段/时间戳/离线变化/瞬时指令、WFI 边沿及缓存、红点超时/重置/时钟溢出、通知唤醒后的空闲计时，以及实际 PCM 的振幅上限、首尾静音、300 ms 间隔和两声波形一致性。
